@@ -1,6 +1,6 @@
 import asyncio
 from datetime import date, timedelta
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -9,6 +9,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton
 )
+from aiogram.client.session.aiohttp import AiohttpSession
 
 from config import BOT_TOKEN, ADMIN_IDS, DARKSTORE
 import db
@@ -74,7 +75,6 @@ def reasons_kb():
     kb = [[InlineKeyboardButton(text=label, callback_data=f"reason:{code}")] for code, label in CANCEL_REASONS]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-from aiogram import Router
 router = Router()
 
 @router.message(Command("start"))
@@ -260,12 +260,17 @@ async def cancels(msg: Message):
 async def main():
     db.init_db()
     db.ensure_week_slots(days=14)
-    bot = Bot(token=BOT_TOKEN)
+    
+    # Настройка прокси
+    proxy_url = "socks5://modeler_ERgRnW:00qoCuIlWfMN@139.144.99.147:23411"
+    session = AiohttpSession(proxy=proxy_url)
+    
+    bot = Bot(token=BOT_TOKEN, session=session)
     dp = Dispatcher()
     dp.include_router(router)
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-    proxy_url = "socks5://modeler_ERgRnW:00qoCuIlWfMN@139.144.99.147:23411"
