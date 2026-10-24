@@ -268,3 +268,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    proxy_url = "socks5://modeler_ERgRnW:00qoCuIlWfMN@139.144.99.147:23411"
