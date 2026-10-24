@@ -1,0 +1,21 @@
+services:
+  ozonfresh-bot:
+    build: .
+    container_name: ozonfresh-bot
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Moscow
+      - DB_PATH=/data/schedule.db
+      - BOT_TOKEN=СЮДА_ТОКЕН
+      - ADMIN_IDS=СЮДА_ТВОЙ_ID
+      - DARKSTORE=Ozon Fresh Даркстор Подольск Октябрьский
+    volumes:
+      - ozonbot_data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ozonbot_data:
