@@ -6,8 +6,8 @@ services:
     environment:
       - TZ=Europe/Moscow
       - DB_PATH=/data/schedule.db
-      - BOT_TOKEN=СЮДА_ТОКЕН
-      - ADMIN_IDS=СЮДА_ТВОЙ_ID
+      - BOT_TOKEN=8953661250:AAF8ZpxMFP4-j25QsvWGQGcTiYAUmeNj0Wk
+      - ADMIN_IDS=1058638017
       - DARKSTORE=Ozon Fresh Даркстор Подольск Октябрьский
     volumes:
       - ozonbot_data:/data
