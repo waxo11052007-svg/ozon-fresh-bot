@@ -54,15 +54,38 @@ def admin_kb():
         resize_keyboard=True
     )
 
-def slots_kb(grouped):
+# --- НОВЫЕ КНОПКИ ДЛЯ СЛОТОВ ---
+
+def dates_kb(grouped):
+    """Показывает только уникальные даты"""
+    dates = sorted(grouped.keys())
     kb = []
-    for d, items in grouped.items():
-        for sid, dd, ts, te in items:
-            kb.append([InlineKeyboardButton(
-                text=f"{dd} {ts}-{te}",
-                callback_data=f"book:{sid}"
-            )])
+    for d in dates:
+        # Форматируем дату из 2026-10-25 в 25.10.2026
+        try:
+            d_formatted = date.fromisoformat(d).strftime('%d.%m.%Y')
+        except:
+            d_formatted = d
+        kb.append([InlineKeyboardButton(
+            text=f"🗓 {d_formatted}",
+            callback_data=f"pickdate:{d}"
+        )])
     return InlineKeyboardMarkup(inline_keyboard=kb) if kb else None
+
+def slots_by_date_kb(slots, selected_date):
+    """Показывает слоты только для выбранной даты"""
+    kb = []
+    for sid, ts, te in slots:
+        kb.append([InlineKeyboardButton(
+            text=f"⏰ {ts} – {te}",
+            callback_data=f"book:{sid}"
+        )])
+    # Кнопка "Назад" к выбору дат
+    kb.append([InlineKeyboardButton(
+        text="🔙 К выбору дат",
+        callback_data="back_to_dates"
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def my_slots_kb(slots):
     kb = [[InlineKeyboardButton(
@@ -114,19 +137,51 @@ async def info(msg: Message):
     await msg.answer(
         f"🏪 <b>{DARKSTORE}</b>\n\n"
         f"• Слоты на 7 дней вперёд\n"
-        f"• 3 смены в день: 08:00-14:00, 14:00-20:00, 20:00-23:00\n"
         f"• Отмена смены — только с указанием причины"
     )
+
+# --- НОВАЯ ЛОГИКА ВЫБОРА СЛОТОВ ---
 
 @router.message(F.text == "📅 Свободные слоты")
 async def free_slots(msg: Message):
     db.ensure_week_slots()
     grouped = db.get_free_slots_by_date()
-    kb = slots_kb(grouped)
+    kb = dates_kb(grouped)
     if not kb:
         await msg.answer("Свободных слотов пока нет 😕")
         return
-    await msg.answer("Выбери слот для записи:", reply_markup=kb)
+    await msg.answer("Выбери дату, на которую хочешь записаться:", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("pickdate:"))
+async def pick_date(cb: CallbackQuery):
+    selected_date = cb.data.split(":")[1]
+    grouped = db.get_free_slots_by_date()
+    
+    if selected_date not in grouped:
+        await cb.answer("На эту дату слотов больше нет 😕", show_alert=True)
+        return
+        
+    # Достаем слоты для этой даты
+    date_slots = [(item[0], item[2], item[3]) for item in grouped[selected_date]]
+    
+    try:
+        d_formatted = date.fromisoformat(selected_date).strftime('%d.%m.%Y')
+    except:
+        d_formatted = selected_date
+
+    await cb.message.edit_text(
+        f"🗓 <b>Дата: {d_formatted}</b>\nВыбери удобное время:",
+        reply_markup=slots_by_date_kb(date_slots, selected_date)
+    )
+
+@router.callback_query(F.data == "back_to_dates")
+async def back_to_dates(cb: CallbackQuery):
+    grouped = db.get_free_slots_by_date()
+    kb = dates_kb(grouped)
+    if not kb:
+        await cb.message.edit_text("Свободных слотов пока нет 😕")
+        return
+    await cb.message.edit_text("Выбери дату, на которую хочешь записаться:", reply_markup=kb)
 
 @router.callback_query(F.data.startswith("book:"))
 async def do_book(cb: CallbackQuery):
@@ -261,7 +316,6 @@ async def main():
     db.init_db()
     db.ensure_week_slots(days=14)
     
-    # Исправленная строка для новых версий aiogram
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher()
     dp.include_router(router)
