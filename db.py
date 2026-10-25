@@ -181,6 +181,12 @@ def save_report(courier_id, report_date, tasks):
     )
     conn.commit(); conn.close()
 
+def has_report_today(courier_id, report_date):
+    conn = sqlite3.connect(DB_PATH)
+    r = conn.execute("SELECT 1 FROM reports WHERE courier_id=? AND date=?", (courier_id, report_date)).fetchone()
+    conn.close()
+    return bool(r)
+
 def get_top(start_date, end_date, limit=3):
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("""
