@@ -26,7 +26,6 @@ def init_db():
         status TEXT DEFAULT 'booked',
         UNIQUE(slot_id, courier_id)
     )""")
-    # Новая таблица для отчетов
     c.execute("""CREATE TABLE IF NOT EXISTS reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         courier_id INTEGER,
@@ -57,6 +56,12 @@ def get_courier(user_id):
     r = conn.execute("SELECT * FROM couriers WHERE user_id=?", (user_id,)).fetchone()
     conn.close()
     return r
+
+def get_all_couriers():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT user_id FROM couriers").fetchall()
+    conn.close()
+    return [r[0] for r in rows]
 
 def ensure_week_slots(days=14):
     conn = sqlite3.connect(DB_PATH)
@@ -168,8 +173,6 @@ def weekly_stats(start_date, end_date):
         stats[name] = stats.get(name, 0) + hours
     return stats
 
-# --- НОВЫЕ ФУНКЦИИ ДЛЯ ЗАДАНИЙ ---
-
 def save_report(courier_id, report_date, tasks):
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
@@ -203,21 +206,6 @@ def get_all_tasks_period(start_date, end_date):
     conn.close()
     return rows
 
-def get_couriers_with_ending_shifts():
-    """Возвращает список курьеров, у которых смена закончилась сегодня"""
-    conn = sqlite3.connect(DB_PATH)
-    today = date.today().isoformat()
-    # Берем всех, кто был записан на смену сегодня (упрощенно)
-    rows = conn.execute("""
-        SELECT DISTINCT c.user_id, s.time_end, c.full_name
-        FROM bookings b
-        JOIN slots s ON b.slot_id = s.id
-        JOIN couriers c ON b.courier_id = c.user_id
-        WHERE s.date = ? AND b.status='booked'
-    """, (today,)).fetchall()
-    conn.close()
-    return rows
-
 def cancellations_report(limit=50):
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("""
@@ -229,8 +217,3 @@ def cancellations_report(limit=50):
     """, (limit,)).fetchall()
     conn.close()
     return rows
-    def get_all_couriers():
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT user_id FROM couriers").fetchall()
-    conn.close()
-    return [r[0] for r in rows]
