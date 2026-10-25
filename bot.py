@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -23,6 +23,9 @@ class CancelSlot(StatesGroup):
     choosing_reason = State()
     detail = State()
 
+class ReportTasks(StatesGroup):
+    waiting_for_tasks = State()
+
 CANCEL_REASONS = [
     ("sick", "🤒 Болезнь"),
     ("family", "👨‍👩‍👧 Семейные обстоятельства"),
@@ -37,7 +40,7 @@ def main_kb(is_admin=False):
     kb = [
         [KeyboardButton(text="📅 Свободные слоты")],
         [KeyboardButton(text="🗓 Мои смены"), KeyboardButton(text="❌ Отменить смену")],
-        [KeyboardButton(text="ℹ️ Инфо")],
+        [KeyboardButton(text="✍️ Ввести задания"), KeyboardButton(text="ℹ️ Инфо")],
     ]
     if is_admin:
         kb.append([KeyboardButton(text="🛠 Админ-панель")])
@@ -48,20 +51,28 @@ def admin_kb():
         keyboard=[
             [KeyboardButton(text="📊 График на сегодня")],
             [KeyboardButton(text="📊 График на завтра")],
+            [KeyboardButton(text="📅 График на неделю")],
+            [KeyboardButton(text="🏆 Топ курьеров"), KeyboardButton(text="📈 Статистика")],
             [KeyboardButton(text="📋 Отчёты по отменам")],
             [KeyboardButton(text="🔙 Назад")],
         ],
         resize_keyboard=True
     )
 
-# --- НОВЫЕ КНОПКИ ДЛЯ СЛОТОВ ---
+def top_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🏆 Топ за сегодня"), KeyboardButton(text="🏆 Топ за неделю")],
+            [KeyboardButton(text="🏆 Топ за месяц")],
+            [KeyboardButton(text="🔙 Назад в админку")],
+        ],
+        resize_keyboard=True
+    )
 
 def dates_kb(grouped):
-    """Показывает только уникальные даты"""
     dates = sorted(grouped.keys())
     kb = []
     for d in dates:
-        # Форматируем дату из 2026-10-25 в 25.10.2026
         try:
             d_formatted = date.fromisoformat(d).strftime('%d.%m.%Y')
         except:
@@ -73,14 +84,12 @@ def dates_kb(grouped):
     return InlineKeyboardMarkup(inline_keyboard=kb) if kb else None
 
 def slots_by_date_kb(slots, selected_date):
-    """Показывает слоты только для выбранной даты"""
     kb = []
     for sid, ts, te in slots:
         kb.append([InlineKeyboardButton(
             text=f"⏰ {ts} – {te}",
             callback_data=f"book:{sid}"
         )])
-    # Кнопка "Назад" к выбору дат
     kb.append([InlineKeyboardButton(
         text="🔙 К выбору дат",
         callback_data="back_to_dates"
@@ -136,14 +145,44 @@ async def reg_phone(msg: Message, state: FSMContext):
 async def info(msg: Message):
     await msg.answer(
         f"🏪 <b>{DARKSTORE}</b>\n\n"
-        f"• Слоты на 7 дней вперёд\n"
-        f"• Отмена смены — только с указанием причины"
+        f"• Слоты на 14 дней вперёд\n"
+        f"• Можно взять только 1 смену в день\n"
+        f"• На одно время могут записаться несколько курьеров\n"
+        f"• После смены обязательно введи количество заданий"
     )
 
-# --- НОВАЯ ЛОГИКА ВЫБОРА СЛОТОВ ---
+# --- ВВОД ЗАДАНИЙ ---
+@router.message(F.text == "✍️ Ввести задания")
+async def start_report(msg: Message, state: FSMContext):
+    await msg.answer("Введи количество выполненных заданий (только число):")
+    await state.set_state(ReportTasks.waiting_for_tasks)
+
+@router.message(ReportTasks.waiting_for_tasks)
+async def process_report(msg: Message, state: FSMContext):
+    if not msg.text.isdigit():
+        await msg.answer("⚠️ Пожалуйста, введи только число (например: 25).")
+        return
+    
+    tasks = int(msg.text)
+    today = date.today().isoformat()
+    db.save_report(msg.from_user.id, today, tasks)
+    
+    await state.clear()
+    await msg.answer(f"✅ Отчёт сохранен: <b>{tasks}</b> заданий.", reply_markup=main_kb(msg.from_user.id in ADMIN_IDS))
+    
+    # Уведомляем админа
+    courier = db.get_courier(msg.from_user.id)
+    for aid in ADMIN_IDS:
+        try:
+            await msg.bot.send_message(aid, f"📝 <b>Новый отчёт</b>\nКурьер: {courier[1]}\nЗаданий: {tasks}")
+        except:
+            pass
+
+# --- СЛОТЫ ---
 
 @router.message(F.text == "📅 Свободные слоты")
-async def free_slots(msg: Message):
+async def free_slots(msg: Message, state: FSMContext):
+    await state.clear()
     db.ensure_week_slots()
     grouped = db.get_free_slots_by_date()
     kb = dates_kb(grouped)
@@ -153,16 +192,16 @@ async def free_slots(msg: Message):
     await msg.answer("Выбери дату, на которую хочешь записаться:", reply_markup=kb)
 
 @router.callback_query(F.data.startswith("pickdate:"))
-async def pick_date(cb: CallbackQuery):
+async def pick_date(cb: CallbackQuery, state: FSMContext):
     selected_date = cb.data.split(":")[1]
-    grouped = db.get_free_slots_by_date()
     
-    if selected_date not in grouped:
-        await cb.answer("На эту дату слотов больше нет 😕", show_alert=True)
+    existing = db.get_courier_shifts_by_date(cb.from_user.id, selected_date)
+    if existing > 0:
+        await cb.answer("⚠️ У тебя уже есть запись на этот день!", show_alert=True)
         return
-        
-    # Достаем слоты для этой даты
-    date_slots = [(item[0], item[2], item[3]) for item in grouped[selected_date]]
+
+    grouped = db.get_free_slots_by_date()
+    date_slots = [(item[0], item[2], item[3]) for item in grouped.get(selected_date, [])]
     
     try:
         d_formatted = date.fromisoformat(selected_date).strftime('%d.%m.%Y')
@@ -189,11 +228,9 @@ async def do_book(cb: CallbackQuery):
     ok = db.book_slot(slot_id, cb.from_user.id)
     if ok:
         s = db.get_slot(slot_id)
-        await cb.message.edit_text(
-            f"✅ Ты записан: <b>{s[1]} {s[2]}-{s[3]}</b>"
-        )
+        await cb.message.edit_text(f"✅ Ты записан: <b>{s[1]} {s[2]}-{s[3]}</b>")
     else:
-        await cb.answer("Слот уже занят 😕", show_alert=True)
+        await cb.answer("Ты уже записан на этот слот 😕", show_alert=True)
 
 @router.message(F.text == "🗓 Мои смены")
 async def my_shifts(msg: Message):
@@ -201,9 +238,7 @@ async def my_shifts(msg: Message):
     if not slots:
         await msg.answer("У тебя нет записей на смены.")
         return
-    text = "🗓 <b>Твои смены:</b>\n" + "\n".join(
-        f"• {d} {ts}-{te}" for _, d, ts, te in slots
-    )
+    text = "🗓 <b>Твои смены:</b>\n" + "\n".join(f"• {d} {ts}-{te}" for _, d, ts, te in slots)
     await msg.answer(text)
 
 @router.message(F.text == "❌ Отменить смену")
@@ -212,20 +247,14 @@ async def cancel_start(msg: Message, state: FSMContext):
     if not slots:
         await msg.answer("Нечего отменять — у тебя нет активных смен.")
         return
-    await msg.answer(
-        "Выбери смену для отмены:",
-        reply_markup=my_slots_kb(slots)
-    )
+    await msg.answer("Выбери смену для отмены:", reply_markup=my_slots_kb(slots))
     await state.set_state(CancelSlot.choosing_slot)
 
 @router.callback_query(F.data.startswith("pick_cancel:"))
 async def cancel_pick(cb: CallbackQuery, state: FSMContext):
     slot_id = int(cb.data.split(":")[1])
     await state.update_data(slot_id=slot_id)
-    await cb.message.edit_text(
-        "Укажи причину отмены:",
-        reply_markup=reasons_kb()
-    )
+    await cb.message.edit_text("Укажи причину отмены:", reply_markup=reasons_kb())
     await state.set_state(CancelSlot.choosing_reason)
 
 @router.callback_query(F.data.startswith("reason:"))
@@ -256,22 +285,26 @@ async def cancel_detail(msg: Message, state: FSMContext):
     db.cancel_slot(data["slot_id"], msg.from_user.id, data["reason_label"], msg.text)
     await state.clear()
     await msg.answer(f"❌ Смена отменена.\nПричина: {data['reason_label']} — {msg.text}")
-    
     for aid in ADMIN_IDS:
         try:
-            await msg.bot.send_message(aid, f"❌ <b>Отмена смены</b>\nКурьер: {db.get_courier(msg.from_user.id)[1]}\nПричина: {data['reason_label']}\nДетали: {msg.text}")
+            await msg.bot.send_message(aid, f"❌ <b>Отмена смены</b>\nКурьер: {db.get_courier(msg.from_user.id)[1]}\nПричина: {data['reason_label']}")
         except:
             pass
 
+# --- АДМИН ПАНЕЛЬ ---
+
 @router.message(F.text == "🛠 Админ-панель")
 async def admin_panel(msg: Message):
-    if msg.from_user.id not in ADMIN_IDS:
-        return
+    if msg.from_user.id not in ADMIN_IDS: return
     await msg.answer("Админ-панель:", reply_markup=admin_kb())
 
 @router.message(F.text == "🔙 Назад")
 async def back(msg: Message):
     await msg.answer("Главное меню", reply_markup=main_kb(msg.from_user.id in ADMIN_IDS))
+
+@router.message(F.text == "🔙 Назад в админку")
+async def back_admin(msg: Message):
+    await msg.answer("Админ-панель:", reply_markup=admin_kb())
 
 @router.message(F.text == "📊 График на сегодня")
 async def sched_today(msg: Message):
@@ -283,20 +316,92 @@ async def sched_tomorrow(msg: Message):
     if msg.from_user.id not in ADMIN_IDS: return
     await send_schedule(msg, date.today() + timedelta(days=1))
 
-async def send_schedule(msg: Message, d: date):
-    db.ensure_week_slots()
-    rows = db.schedule_for_date(d.isoformat())
-    if not rows:
-        await msg.answer("Нет данных.")
+@router.message(F.text == "📅 График на неделю")
+async def sched_week(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS: return
+    today = date.today()
+    lines = ["📅 <b>График на неделю:</b>\n"]
+    
+    for i in range(7):
+        d = today + timedelta(days=i)
+        rows = db.schedule_for_date(d.isoformat())
+        if not rows: continue
+        lines.append(f"<b>{d.strftime('%d.%m (%a)')}</b>")
+        for ts, te, name, phone in rows:
+            lines.append(f"  • {ts}-{te} — {name if name else 'пусто'}")
+        lines.append("")
+    
+    text = "\n".join(lines)
+    for i in range(0, len(text), 4000):
+        await msg.answer(text[i:i+4000])
+
+@router.message(F.text == "📈 Статистика")
+async def stats_menu(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS: return
+    today = date.today()
+    start = today - timedelta(days=today.weekday())
+    end = start + timedelta(days=6)
+    
+    stats = db.weekly_stats(start.isoformat(), end.isoformat())
+    tasks = db.get_all_tasks_period(start.isoformat(), end.isoformat())
+    
+    lines = [f"📈 <b>Статистика за неделю</b>\n({start.strftime('%d.%m')} - {end.strftime('%d.%m')}):\n"]
+    
+    if not stats and not tasks:
+        await msg.answer("За эту неделю пока нет данных.")
         return
-    lines = [f"📊 <b>График на {d.strftime('%d.%m.%Y')}</b>"]
-    for sid, ts, te, status, name, phone in rows:
-        if status == "booked":
-            lines.append(f"✅ {ts}-{te} — {name} ({phone})")
-        elif status == "free":
-            lines.append(f"🟢 {ts}-{te} — свободен")
-        else:
-            lines.append(f"🔴 {ts}-{te} — отменён")
+        
+    lines.append("<b>Часы:</b>")
+    for name, hours in sorted(stats.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"👤 {name}: {hours:.1f} ч.")
+        
+    lines.append("\n<b>Задания:</b>")
+    for name, count in tasks:
+        lines.append(f"👤 {name}: {count} шт.")
+        
+    await msg.answer("\n".join(lines))
+
+# --- ТОП КУРЬЕРОВ ---
+
+@router.message(F.text == "🏆 Топ курьеров")
+async def top_menu(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS: return
+    await msg.answer("Выбери период топа:", reply_markup=top_kb())
+
+@router.message(F.text == "🏆 Топ за сегодня")
+async def top_day(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS: return
+    today = date.today().isoformat()
+    await send_top(msg, today, today, "Сегодня")
+
+@router.message(F.text == "🏆 Топ за неделю")
+async def top_week(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS: return
+    today = date.today()
+    start = (today - timedelta(days=today.weekday())).isoformat()
+    end = (today + timedelta(days=6)).isoformat()
+    await send_top(msg, start, end, "Неделя")
+
+@router.message(F.text == "🏆 Топ за месяц")
+async def top_month(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS: return
+    today = date.today()
+    start = today.replace(day=1).isoformat()
+    next_month = today.replace(day=28) + timedelta(days=4)
+    end = (next_month - timedelta(days=next_month.day)).isoformat()
+    await send_top(msg, start, end, "Месяц")
+
+async def send_top(msg: Message, start, end, period_name):
+    rows = db.get_top(start, end, limit=3)
+    if not rows:
+        await msg.answer(f"За период «{period_name}» пока нет выполненных заданий.")
+        return
+    
+    lines = [f"🏆 <b>Топ-3 курьера ({period_name}):</b>\n"]
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (name, tasks) in enumerate(rows):
+        lines.append(f"{medals[i]} <b>{name}</b> — {tasks} заданий")
+        
     await msg.answer("\n".join(lines))
 
 @router.message(F.text == "📋 Отчёты по отменам")
@@ -310,6 +415,20 @@ async def cancels(msg: Message):
     for d, ts, te, name, reason, detail, at in rows:
         extra = f" — {detail}" if detail else ""
         lines.append(f"• {d} {ts}-{te} | {name or '?'} | {reason}{extra}")
+    await msg.answer("\n".join(lines))
+
+async def send_schedule(msg: Message, d: date):
+    db.ensure_week_slots()
+    rows = db.schedule_for_date(d.isoformat())
+    if not rows:
+        await msg.answer("Нет данных.")
+        return
+    lines = [f"📊 <b>График на {d.strftime('%d.%m.%Y')}</b>"]
+    for ts, te, name, phone in rows:
+        if name:
+            lines.append(f"✅ {ts}-{te} — {name} ({phone})")
+        else:
+            lines.append(f"🟢 {ts}-{te} — свободен")
     await msg.answer("\n".join(lines))
 
 async def main():
