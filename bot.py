@@ -7,9 +7,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 )
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramForbiddenError
 
 from config import BOT_TOKEN, ADMIN_IDS, DARKSTORE
 import db
@@ -25,6 +26,9 @@ class CancelSlot(StatesGroup):
 
 class ReportTasks(StatesGroup):
     waiting_for_tasks = State()
+
+class Broadcast(StatesGroup):
+    waiting_for_text = State()
 
 CANCEL_REASONS = [
     ("sick", "🤒 Болезнь"),
@@ -53,6 +57,7 @@ def admin_kb():
             [KeyboardButton(text="📊 График на завтра")],
             [KeyboardButton(text="📅 График на неделю")],
             [KeyboardButton(text="🏆 Топ курьеров"), KeyboardButton(text="📈 Статистика")],
+            [KeyboardButton(text="📢 Сделать рассылку")],
             [KeyboardButton(text="📋 Отчёты по отменам")],
             [KeyboardButton(text="🔙 Назад")],
         ],
@@ -67,6 +72,13 @@ def top_kb():
             [KeyboardButton(text="🔙 Назад в админку")],
         ],
         resize_keyboard=True
+    )
+
+def phone_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Отправить номер телефона", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
     )
 
 def dates_kb(grouped):
@@ -111,9 +123,7 @@ router = Router()
 
 @router.message(Command("start"))
 async def start(msg: Message, state: FSMContext):
-    # Если команда в группе, не спамим регистрацией
     if msg.chat.type in ['group', 'supergroup']:
-        await msg.answer("Привет! Я бот для графиков. Используй /top для топа или /stats для статистики.")
         return
         
     await state.clear()
@@ -133,18 +143,33 @@ async def start(msg: Message, state: FSMContext):
 @router.message(Reg.name)
 async def reg_name(msg: Message, state: FSMContext):
     await state.update_data(name=msg.text.strip())
-    await msg.answer("📱 Введи номер телефона (например +79991234567):")
+    await msg.answer(
+        "📱 Теперь отправь свой номер телефона, нажав на кнопку ниже.\n"
+        "Так мы будем уверены, что номер настоящий.", 
+        reply_markup=phone_kb()
+    )
     await state.set_state(Reg.phone)
 
-@router.message(Reg.phone)
-async def reg_phone(msg: Message, state: FSMContext):
+# Обработка кнопки с контактом
+@router.message(Reg.phone, F.contact)
+async def reg_phone_contact(msg: Message, state: FSMContext):
     data = await state.get_data()
-    db.add_courier(msg.from_user.id, data["name"], msg.text.strip())
+    # Проверяем, что курьер отправил СВОЙ номер, а не переслал чужой контакт
+    if msg.contact.user_id != msg.from_user.id:
+        await msg.answer("⚠️ Пожалуйста, отправь именно свой номер телефона через кнопку.")
+        return
+        
+    db.add_courier(msg.from_user.id, data["name"], msg.contact.phone_number)
     await state.clear()
     await msg.answer(
         "✅ Регистрация завершена!",
         reply_markup=main_kb(msg.from_user.id in ADMIN_IDS)
     )
+
+# Если написал текстом вместо нажатия кнопки
+@router.message(Reg.phone)
+async def reg_phone_wrong(msg: Message):
+    await msg.answer("⚠️ Пожалуйста, нажми на кнопку «📱 Отправить номер телефона» внизу экрана.", reply_markup=phone_kb())
 
 @router.message(F.text == "ℹ️ Инфо")
 async def info(msg: Message):
@@ -161,7 +186,6 @@ async def info(msg: Message):
 @router.message(Command("top"))
 async def chat_top(msg: Message):
     today = date.today()
-    # Берем топ за неделю по умолчанию для чата
     start = (today - timedelta(days=today.weekday())).isoformat()
     end = (today + timedelta(days=6)).isoformat()
     await send_top_to_chat(msg, start, end, "Неделя")
@@ -212,18 +236,16 @@ async def process_report(msg: Message, state: FSMContext):
     report_text = f"📝 <b>Новый отчёт о заданиях</b>\n\n👤 Курьер: <b>{courier[1]}</b>\n📞 Тел: {courier[2]}\n📦 Выполнено: <b>{tasks}</b> шт."
     
     from config import WORK_CHAT_ID
-    
     for aid in ADMIN_IDS:
         try:
             await msg.bot.send_message(aid, report_text)
         except:
             pass
-
     if WORK_CHAT_ID != 0:
         try:
             await msg.bot.send_message(WORK_CHAT_ID, report_text)
-        except Exception as e:
-            print(f"Не удалось отправить в чат: {e}")
+        except:
+            pass
 
 # --- СЛОТЫ ---
 
@@ -241,20 +263,16 @@ async def free_slots(msg: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("pickdate:"))
 async def pick_date(cb: CallbackQuery, state: FSMContext):
     selected_date = cb.data.split(":")[1]
-    
     existing = db.get_courier_shifts_by_date(cb.from_user.id, selected_date)
     if existing > 0:
         await cb.answer("⚠️ У тебя уже есть запись на этот день!", show_alert=True)
         return
-
     grouped = db.get_free_slots_by_date()
     date_slots = [(item[0], item[2], item[3]) for item in grouped.get(selected_date, [])]
-    
     try:
         d_formatted = date.fromisoformat(selected_date).strftime('%d.%m.%Y')
     except:
         d_formatted = selected_date
-
     await cb.message.edit_text(
         f"🗓 <b>Дата: {d_formatted}</b>\nВыбери удобное время:",
         reply_markup=slots_by_date_kb(date_slots, selected_date)
@@ -309,17 +327,14 @@ async def cancel_reason(cb: CallbackQuery, state: FSMContext):
     code = cb.data.split(":")[1]
     label = dict(CANCEL_REASONS)[code]
     await state.update_data(reason_code=code, reason_label=label)
-
     if code == "other":
         await cb.message.edit_text("Опиши причину текстом:")
         await state.set_state(CancelSlot.detail)
         return
-
     data = await state.get_data()
     db.cancel_slot(data["slot_id"], cb.from_user.id, label, "")
     await state.clear()
     await cb.message.edit_text(f"❌ Смена отменена.\nПричина: {label}")
-    
     for aid in ADMIN_IDS:
         try:
             await cb.bot.send_message(aid, f"❌ <b>Отмена смены</b>\nКурьер: {db.get_courier(cb.from_user.id)[1]}\nПричина: {label}")
@@ -353,6 +368,35 @@ async def back(msg: Message):
 async def back_admin(msg: Message):
     await msg.answer("Админ-панель:", reply_markup=admin_kb())
 
+# --- РАССЫЛКА ---
+
+@router.message(F.text == "📢 Сделать рассылку")
+async def broadcast_start(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS: return
+    await msg.answer("Напиши текст сообщения, которое нужно разослать всем курьерам:", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Broadcast.waiting_for_text)
+
+@router.message(Broadcast.waiting_for_text)
+async def broadcast_send(msg: Message, state: FSMContext):
+    if msg.from_user.id not in ADMIN_IDS: return
+    
+    text = msg.text
+    couriers = db.get_all_couriers()
+    
+    success = 0
+    for cid in couriers:
+        try:
+            await msg.bot.send_message(cid, text)
+            success += 1
+            await asyncio.sleep(0.05) # Пауза, чтобы Telegram не забанил за спам
+        except Exception:
+            pass
+            
+    await state.clear()
+    await msg.answer(f"✅ Рассылка завершена.\nДоставлено: {success} из {len(couriers)}", reply_markup=admin_kb())
+
+# --- ГРАФИКИ ---
+
 @router.message(F.text == "📊 График на сегодня")
 async def sched_today(msg: Message):
     if msg.from_user.id not in ADMIN_IDS: return
@@ -368,7 +412,6 @@ async def sched_week(msg: Message):
     if msg.from_user.id not in ADMIN_IDS: return
     today = date.today()
     lines = ["📅 <b>График на неделю:</b>\n"]
-    
     for i in range(7):
         d = today + timedelta(days=i)
         rows = db.schedule_for_date(d.isoformat())
@@ -377,7 +420,6 @@ async def sched_week(msg: Message):
         for ts, te, name, phone in rows:
             lines.append(f"  • {ts}-{te} — {name if name else 'пусто'}")
         lines.append("")
-    
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):
         await msg.answer(text[i:i+4000])
@@ -386,8 +428,6 @@ async def sched_week(msg: Message):
 async def stats_menu(msg: Message):
     if msg.from_user.id not in ADMIN_IDS: return
     await chat_stats(msg)
-
-# --- ТОП КУРЬЕРОВ ---
 
 @router.message(F.text == "🏆 Топ курьеров")
 async def top_menu(msg: Message):
@@ -422,12 +462,10 @@ async def send_top_to_chat(msg: Message, start, end, period_name):
     if not rows:
         await msg.answer(f"За период «{period_name}» пока нет выполненных заданий.")
         return
-    
     lines = [f"🏆 <b>Топ-3 курьера ({period_name}):</b>\n"]
     medals = ["🥇", "🥈", "🥉"]
     for i, (name, tasks) in enumerate(rows):
         lines.append(f"{medals[i]} <b>{name}</b> — {tasks} заданий")
-        
     await msg.answer("\n".join(lines))
 
 @router.message(F.text == "📋 Отчёты по отменам")
