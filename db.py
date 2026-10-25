@@ -229,3 +229,8 @@ def cancellations_report(limit=50):
     """, (limit,)).fetchall()
     conn.close()
     return rows
+    def get_all_couriers():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT user_id FROM couriers").fetchall()
+    conn.close()
+    return [r[0] for r in rows]
