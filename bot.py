@@ -9,6 +9,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton
 )
+from aiogram.client.default import DefaultBotProperties
 
 from config import BOT_TOKEN, ADMIN_IDS, DARKSTORE
 import db
@@ -260,8 +261,8 @@ async def main():
     db.init_db()
     db.ensure_week_slots(days=14)
     
-    # Здесь добавлено parse_mode="HTML"
-    bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+    # Исправленная строка для новых версий aiogram
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher()
     dp.include_router(router)
     
