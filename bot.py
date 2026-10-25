@@ -260,7 +260,8 @@ async def main():
     db.init_db()
     db.ensure_week_slots(days=14)
     
-    bot = Bot(token=BOT_TOKEN)
+    # Здесь добавлено parse_mode="HTML"
+    bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
     dp = Dispatcher()
     dp.include_router(router)
     
