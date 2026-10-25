@@ -9,7 +9,6 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton
 )
-from aiogram.client.session.aiohttp import AiohttpSession
 
 from config import BOT_TOKEN, ADMIN_IDS, DARKSTORE
 import db
@@ -261,11 +260,7 @@ async def main():
     db.init_db()
     db.ensure_week_slots(days=14)
     
-    # Настройка прокси
-    proxy_url = "socks5://modeler_ERgRnW:00qoCuIlWfMN@139.144.99.147:23411"
-    session = AiohttpSession(proxy=proxy_url)
-    
-    bot = Bot(token=BOT_TOKEN, session=session)
+    bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
     
