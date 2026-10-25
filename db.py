@@ -2,7 +2,8 @@ import os
 import sqlite3
 from datetime import datetime, date, timedelta
 
-DB_PATH = os.getenv("DB_PATH", "/data/schedule.db")
+# ИЗМЕНЕНО: убрали папку /data/, чтобы бот сохранял базу прямо в своей папке
+DB_PATH = os.getenv("DB_PATH", "schedule.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
