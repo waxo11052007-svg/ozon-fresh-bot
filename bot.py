@@ -111,6 +111,11 @@ router = Router()
 
 @router.message(Command("start"))
 async def start(msg: Message, state: FSMContext):
+    # Если команда в группе, не спамим регистрацией
+    if msg.chat.type in ['group', 'supergroup']:
+        await msg.answer("Привет! Я бот для графиков. Используй /top для топа или /stats для статистики.")
+        return
+        
     await state.clear()
     if db.get_courier(msg.from_user.id):
         await msg.answer(
@@ -151,7 +156,40 @@ async def info(msg: Message):
         f"• После смены обязательно введи количество заданий"
     )
 
+# --- КОМАНДЫ ДЛЯ ЧАТА ---
+
+@router.message(Command("top"))
+async def chat_top(msg: Message):
+    today = date.today()
+    # Берем топ за неделю по умолчанию для чата
+    start = (today - timedelta(days=today.weekday())).isoformat()
+    end = (today + timedelta(days=6)).isoformat()
+    await send_top_to_chat(msg, start, end, "Неделя")
+
+@router.message(Command("stats"))
+async def chat_stats(msg: Message):
+    today = date.today()
+    start = (today - timedelta(days=today.weekday())).isoformat()
+    end = (today + timedelta(days=6)).isoformat()
+    
+    stats = db.weekly_stats(start, end)
+    tasks = db.get_all_tasks_period(start, end)
+    
+    if not stats and not tasks:
+        await msg.answer("За эту неделю пока нет данных.")
+        return
+        
+    lines = [f"📈 <b>Статистика за неделю</b>\n({start} - {end}):\n"]
+    for name, hours in sorted(stats.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"👤 {name}: {hours:.1f} ч.")
+    lines.append("\n<b>Задания:</b>")
+    for name, count in tasks:
+        lines.append(f"👤 {name}: {count} шт.")
+        
+    await msg.answer("\n".join(lines))
+
 # --- ВВОД ЗАДАНИЙ ---
+
 @router.message(F.text == "✍️ Ввести задания")
 async def start_report(msg: Message, state: FSMContext):
     await msg.answer("Введи количество выполненных заданий (только число):")
@@ -170,13 +208,22 @@ async def process_report(msg: Message, state: FSMContext):
     await state.clear()
     await msg.answer(f"✅ Отчёт сохранен: <b>{tasks}</b> заданий.", reply_markup=main_kb(msg.from_user.id in ADMIN_IDS))
     
-    # Уведомляем админа
     courier = db.get_courier(msg.from_user.id)
+    report_text = f"📝 <b>Новый отчёт о заданиях</b>\n\n👤 Курьер: <b>{courier[1]}</b>\n📞 Тел: {courier[2]}\n📦 Выполнено: <b>{tasks}</b> шт."
+    
+    from config import WORK_CHAT_ID
+    
     for aid in ADMIN_IDS:
         try:
-            await msg.bot.send_message(aid, f"📝 <b>Новый отчёт</b>\nКурьер: {courier[1]}\nЗаданий: {tasks}")
+            await msg.bot.send_message(aid, report_text)
         except:
             pass
+
+    if WORK_CHAT_ID != 0:
+        try:
+            await msg.bot.send_message(WORK_CHAT_ID, report_text)
+        except Exception as e:
+            print(f"Не удалось отправить в чат: {e}")
 
 # --- СЛОТЫ ---
 
@@ -338,28 +385,7 @@ async def sched_week(msg: Message):
 @router.message(F.text == "📈 Статистика")
 async def stats_menu(msg: Message):
     if msg.from_user.id not in ADMIN_IDS: return
-    today = date.today()
-    start = today - timedelta(days=today.weekday())
-    end = start + timedelta(days=6)
-    
-    stats = db.weekly_stats(start.isoformat(), end.isoformat())
-    tasks = db.get_all_tasks_period(start.isoformat(), end.isoformat())
-    
-    lines = [f"📈 <b>Статистика за неделю</b>\n({start.strftime('%d.%m')} - {end.strftime('%d.%m')}):\n"]
-    
-    if not stats and not tasks:
-        await msg.answer("За эту неделю пока нет данных.")
-        return
-        
-    lines.append("<b>Часы:</b>")
-    for name, hours in sorted(stats.items(), key=lambda x: x[1], reverse=True):
-        lines.append(f"👤 {name}: {hours:.1f} ч.")
-        
-    lines.append("\n<b>Задания:</b>")
-    for name, count in tasks:
-        lines.append(f"👤 {name}: {count} шт.")
-        
-    await msg.answer("\n".join(lines))
+    await chat_stats(msg)
 
 # --- ТОП КУРЬЕРОВ ---
 
@@ -372,7 +398,7 @@ async def top_menu(msg: Message):
 async def top_day(msg: Message):
     if msg.from_user.id not in ADMIN_IDS: return
     today = date.today().isoformat()
-    await send_top(msg, today, today, "Сегодня")
+    await send_top_to_chat(msg, today, today, "Сегодня")
 
 @router.message(F.text == "🏆 Топ за неделю")
 async def top_week(msg: Message):
@@ -380,7 +406,7 @@ async def top_week(msg: Message):
     today = date.today()
     start = (today - timedelta(days=today.weekday())).isoformat()
     end = (today + timedelta(days=6)).isoformat()
-    await send_top(msg, start, end, "Неделя")
+    await send_top_to_chat(msg, start, end, "Неделя")
 
 @router.message(F.text == "🏆 Топ за месяц")
 async def top_month(msg: Message):
@@ -389,9 +415,9 @@ async def top_month(msg: Message):
     start = today.replace(day=1).isoformat()
     next_month = today.replace(day=28) + timedelta(days=4)
     end = (next_month - timedelta(days=next_month.day)).isoformat()
-    await send_top(msg, start, end, "Месяц")
+    await send_top_to_chat(msg, start, end, "Месяц")
 
-async def send_top(msg: Message, start, end, period_name):
+async def send_top_to_chat(msg: Message, start, end, period_name):
     rows = db.get_top(start, end, limit=3)
     if not rows:
         await msg.answer(f"За период «{period_name}» пока нет выполненных заданий.")
