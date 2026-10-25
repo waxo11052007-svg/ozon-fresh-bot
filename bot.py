@@ -10,7 +10,6 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 )
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramForbiddenError
 
 from config import BOT_TOKEN, ADMIN_IDS, DARKSTORE
 import db
@@ -150,11 +149,9 @@ async def reg_name(msg: Message, state: FSMContext):
     )
     await state.set_state(Reg.phone)
 
-# Обработка кнопки с контактом
 @router.message(Reg.phone, F.contact)
 async def reg_phone_contact(msg: Message, state: FSMContext):
     data = await state.get_data()
-    # Проверяем, что курьер отправил СВОЙ номер, а не переслал чужой контакт
     if msg.contact.user_id != msg.from_user.id:
         await msg.answer("⚠️ Пожалуйста, отправь именно свой номер телефона через кнопку.")
         return
@@ -166,7 +163,6 @@ async def reg_phone_contact(msg: Message, state: FSMContext):
         reply_markup=main_kb(msg.from_user.id in ADMIN_IDS)
     )
 
-# Если написал текстом вместо нажатия кнопки
 @router.message(Reg.phone)
 async def reg_phone_wrong(msg: Message):
     await msg.answer("⚠️ Пожалуйста, нажми на кнопку «📱 Отправить номер телефона» внизу экрана.", reply_markup=phone_kb())
@@ -180,8 +176,6 @@ async def info(msg: Message):
         f"• На одно время могут записаться несколько курьеров\n"
         f"• После смены обязательно введи количество заданий"
     )
-
-# --- КОМАНДЫ ДЛЯ ЧАТА ---
 
 @router.message(Command("top"))
 async def chat_top(msg: Message):
@@ -216,7 +210,11 @@ async def chat_stats(msg: Message):
 
 @router.message(F.text == "✍️ Ввести задания")
 async def start_report(msg: Message, state: FSMContext):
-    await msg.answer("Введи количество выполненных заданий (только число):")
+    today = date.today().isoformat()
+    if db.has_report_today(msg.from_user.id, today):
+        await msg.answer("⚠️ Ты уже сдал отчет за сегодня! Завтра сможешь сдать новый.")
+        return
+    await msg.answer("Введи количество выполненных заданий (число от 1 до 150):")
     await state.set_state(ReportTasks.waiting_for_tasks)
 
 @router.message(ReportTasks.waiting_for_tasks)
@@ -226,9 +224,15 @@ async def process_report(msg: Message, state: FSMContext):
         return
     
     tasks = int(msg.text)
+    if tasks < 1:
+        await msg.answer("⚠️ Количество заданий должно быть больше нуля.")
+        return
+    if tasks > 150:
+        await msg.answer("⚠️ Слишком много! Максимум 150 заданий за смену.")
+        return
+    
     today = date.today().isoformat()
     db.save_report(msg.from_user.id, today, tasks)
-    
     await state.clear()
     await msg.answer(f"✅ Отчёт сохранен: <b>{tasks}</b> заданий.", reply_markup=main_kb(msg.from_user.id in ADMIN_IDS))
     
@@ -368,8 +372,6 @@ async def back(msg: Message):
 async def back_admin(msg: Message):
     await msg.answer("Админ-панель:", reply_markup=admin_kb())
 
-# --- РАССЫЛКА ---
-
 @router.message(F.text == "📢 Сделать рассылку")
 async def broadcast_start(msg: Message, state: FSMContext):
     if msg.from_user.id not in ADMIN_IDS: return
@@ -388,14 +390,12 @@ async def broadcast_send(msg: Message, state: FSMContext):
         try:
             await msg.bot.send_message(cid, text)
             success += 1
-            await asyncio.sleep(0.05) # Пауза, чтобы Telegram не забанил за спам
+            await asyncio.sleep(0.05)
         except Exception:
             pass
             
     await state.clear()
     await msg.answer(f"✅ Рассылка завершена.\nДоставлено: {success} из {len(couriers)}", reply_markup=admin_kb())
-
-# --- ГРАФИКИ ---
 
 @router.message(F.text == "📊 График на сегодня")
 async def sched_today(msg: Message):
