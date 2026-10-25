@@ -2,7 +2,6 @@ import os
 import sqlite3
 from datetime import datetime, date, timedelta
 
-# ИЗМЕНЕНО: убрали папку /data/, чтобы бот сохранял базу прямо в своей папке
 DB_PATH = os.getenv("DB_PATH", "schedule.db")
 
 def init_db():
@@ -47,10 +46,20 @@ def get_courier(user_id):
     conn.close()
     return r
 
-def ensure_week_slots(days=7):
+def ensure_week_slots(days=14):
     conn = sqlite3.connect(DB_PATH)
     today = date.today()
-    times = [("08:00","14:00"), ("14:00","20:00"), ("20:00","23:00")]
+    
+    # ТВОИ НОВЫЕ СМЕНЫ
+    times = [
+        ("11:00", "00:00"), # 13 часов
+        ("08:00", "20:00"), # 12 часов
+        ("13:00", "01:00"), # 12 часов (вечерняя)
+        ("17:00", "01:00"), # 8 часов
+        ("17:00", "00:00"), # 7 часов
+        ("18:00", "00:00")  # 6 часов
+    ]
+    
     for i in range(days):
         d = (today + timedelta(days=i)).isoformat()
         for ts, te in times:
