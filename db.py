@@ -17,9 +17,21 @@ def init_db():
         date TEXT NOT NULL,
         time_start TEXT NOT NULL,
         time_end TEXT NOT NULL,
-        courier_id INTEGER,
-        status TEXT DEFAULT 'free',
         created_at TEXT
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS bookings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        slot_id INTEGER,
+        courier_id INTEGER,
+        status TEXT DEFAULT 'booked',
+        UNIQUE(slot_id, courier_id)
+    )""")
+    # Новая таблица для отчетов
+    c.execute("""CREATE TABLE IF NOT EXISTS reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        courier_id INTEGER,
+        date TEXT,
+        tasks INTEGER
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS cancellations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,35 +61,37 @@ def get_courier(user_id):
 def ensure_week_slots(days=14):
     conn = sqlite3.connect(DB_PATH)
     today = date.today()
-    
-    # ТВОИ НОВЫЕ СМЕНЫ
     times = [
-        ("11:00", "00:00"), # 13 часов
-        ("08:00", "20:00"), # 12 часов
-        ("13:00", "01:00"), # 12 часов (вечерняя)
-        ("17:00", "01:00"), # 8 часов
-        ("17:00", "00:00"), # 7 часов
-        ("18:00", "00:00")  # 6 часов
+        ("11:00", "00:00"), ("08:00", "20:00"), ("13:00", "01:00"),
+        ("17:00", "01:00"), ("17:00", "00:00"), ("18:00", "00:00")
     ]
-    
     for i in range(days):
         d = (today + timedelta(days=i)).isoformat()
         for ts, te in times:
             exists = conn.execute(
-                "SELECT 1 FROM slots WHERE date=? AND time_start=? AND status!='cancelled'",
-                (d, ts)
+                "SELECT 1 FROM slots WHERE date=? AND time_start=?", (d, ts)
             ).fetchone()
             if not exists:
                 conn.execute(
-                    "INSERT INTO slots(date,time_start,time_end,status,created_at) VALUES (?,?,?, 'free', ?)",
+                    "INSERT INTO slots(date,time_start,time_end,created_at) VALUES (?,?,?,?)",
                     (d, ts, te, datetime.now().isoformat())
                 )
     conn.commit(); conn.close()
 
+def get_courier_shifts_by_date(courier_id, target_date):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT b.id FROM bookings b
+        JOIN slots s ON b.slot_id = s.id
+        WHERE b.courier_id=? AND s.date=? AND b.status='booked'
+    """, (courier_id, target_date)).fetchall()
+    conn.close()
+    return len(rows)
+
 def get_free_slots_by_date():
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT id,date,time_start,time_end FROM slots WHERE status='free' ORDER BY date,time_start"
+        "SELECT id,date,time_start,time_end FROM slots WHERE date >= date('now') ORDER BY date,time_start"
     ).fetchall()
     conn.close()
     grouped = {}
@@ -87,20 +101,22 @@ def get_free_slots_by_date():
 
 def book_slot(slot_id, courier_id):
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.execute(
-        "UPDATE slots SET courier_id=?, status='booked' WHERE id=? AND status='free'",
-        (courier_id, slot_id)
-    )
-    ok = cur.rowcount > 0
+    try:
+        conn.execute("INSERT INTO bookings(slot_id, courier_id) VALUES (?,?)", (slot_id, courier_id))
+        ok = True
+    except sqlite3.IntegrityError:
+        ok = False
     conn.commit(); conn.close()
     return ok
 
 def get_my_slots(courier_id):
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT id,date,time_start,time_end FROM slots WHERE courier_id=? AND status='booked' ORDER BY date,time_start",
-        (courier_id,)
-    ).fetchall()
+    rows = conn.execute("""
+        SELECT s.id, s.date, s.time_start, s.time_end 
+        FROM bookings b JOIN slots s ON b.slot_id = s.id 
+        WHERE b.courier_id=? AND b.status='booked' 
+        ORDER BY s.date, s.time_start
+    """, (courier_id,)).fetchall()
     conn.close()
     return rows
 
@@ -112,10 +128,7 @@ def get_slot(slot_id):
 
 def cancel_slot(slot_id, courier_id, reason, detail):
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "UPDATE slots SET status='cancelled', courier_id=NULL WHERE id=? AND courier_id=? AND status='booked'",
-        (slot_id, courier_id)
-    )
+    conn.execute("UPDATE bookings SET status='cancelled' WHERE slot_id=? AND courier_id=?", (slot_id, courier_id))
     conn.execute(
         "INSERT INTO cancellations(slot_id,courier_id,reason,reason_detail,cancelled_at) VALUES (?,?,?,?,?)",
         (slot_id, courier_id, reason, detail, datetime.now().isoformat())
@@ -125,10 +138,83 @@ def cancel_slot(slot_id, courier_id, reason, detail):
 def schedule_for_date(d):
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("""
-        SELECT s.id, s.time_start, s.time_end, s.status, c.full_name, c.phone
-        FROM slots s LEFT JOIN couriers c ON s.courier_id = c.user_id
+        SELECT s.time_start, s.time_end, c.full_name, c.phone
+        FROM slots s 
+        LEFT JOIN bookings b ON s.id = b.slot_id AND b.status='booked'
+        LEFT JOIN couriers c ON b.courier_id = c.user_id
         WHERE s.date=? ORDER BY s.time_start
     """, (d,)).fetchall()
+    conn.close()
+    return rows
+
+def weekly_stats(start_date, end_date):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT c.full_name, s.time_start, s.time_end
+        FROM bookings b
+        JOIN slots s ON b.slot_id = s.id
+        JOIN couriers c ON b.courier_id = c.user_id
+        WHERE s.date >= ? AND s.date <= ? AND b.status='booked'
+    """, (start_date, end_date)).fetchall()
+    conn.close()
+    
+    stats = {}
+    for name, ts, te in rows:
+        t1 = datetime.strptime(ts, "%H:%M")
+        t2 = datetime.strptime(te, "%H:%M")
+        if t2 < t1:
+            t2 += timedelta(days=1)
+        hours = (t2 - t1).total_seconds() / 3600
+        stats[name] = stats.get(name, 0) + hours
+    return stats
+
+# --- НОВЫЕ ФУНКЦИИ ДЛЯ ЗАДАНИЙ ---
+
+def save_report(courier_id, report_date, tasks):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO reports (courier_id, date, tasks) VALUES (?, ?, ?)",
+        (courier_id, report_date, tasks)
+    )
+    conn.commit(); conn.close()
+
+def get_top(start_date, end_date, limit=3):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT c.full_name, SUM(r.tasks) as total_tasks
+        FROM reports r
+        JOIN couriers c ON r.courier_id = c.user_id
+        WHERE r.date >= ? AND r.date <= ?
+        GROUP BY r.courier_id
+        ORDER BY total_tasks DESC
+        LIMIT ?
+    """, (start_date, end_date, limit)).fetchall()
+    conn.close()
+    return rows
+
+def get_all_tasks_period(start_date, end_date):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("""
+        SELECT c.full_name, SUM(r.tasks)
+        FROM reports r JOIN couriers c ON r.courier_id = c.user_id
+        WHERE r.date >= ? AND r.date <= ?
+        GROUP BY r.courier_id ORDER BY SUM(r.tasks) DESC
+    """, (start_date, end_date)).fetchall()
+    conn.close()
+    return rows
+
+def get_couriers_with_ending_shifts():
+    """Возвращает список курьеров, у которых смена закончилась сегодня"""
+    conn = sqlite3.connect(DB_PATH)
+    today = date.today().isoformat()
+    # Берем всех, кто был записан на смену сегодня (упрощенно)
+    rows = conn.execute("""
+        SELECT DISTINCT c.user_id, s.time_end, c.full_name
+        FROM bookings b
+        JOIN slots s ON b.slot_id = s.id
+        JOIN couriers c ON b.courier_id = c.user_id
+        WHERE s.date = ? AND b.status='booked'
+    """, (today,)).fetchall()
     conn.close()
     return rows
 
