@@ -29,8 +29,9 @@ class ReportTasks(StatesGroup):
 class Broadcast(StatesGroup):
     waiting_for_text = State()
 
-class MultiBook(StatesGroup):
-    choosing_times = State()
+class BookingProcess(StatesGroup):
+    choosing_duration = State()
+    choosing_time = State()
 
 CANCEL_REASONS = [
     ("sick", "🤒 Болезнь"),
@@ -83,40 +84,52 @@ def phone_kb():
         one_time_keyboard=True
     )
 
-# --- НОВЫЕ КНОПКИ ДЛЯ МУЛЬТИВЫБОРА ---
+# --- КНОПКИ ДЛЯ НОВОЙ СИСТЕМЫ ---
 
-def multi_dates_kb(grouped, selected_dates):
-    """Показывает даты с галочками для мультивыбора"""
-    dates = sorted(grouped.keys())
+def dates_kb():
+    """Показывает даты на 14 дней вперед"""
     kb = []
-    for d in dates:
-        try:
-            d_formatted = date.fromisoformat(d).strftime('%d.%m.%Y')
-        except:
-            d_formatted = d
-        
-        prefix = "✅ " if d in selected_dates else "🗓 "
-        kb.append([InlineKeyboardButton(
-            text=f"{prefix}{d_formatted}",
-            callback_data=f"toggle_date:{d}"
-        )])
-    
-    if selected_dates:
-        kb.append([InlineKeyboardButton(
-            text="💾 Записаться на выбранные дни",
-            callback_data="start_multi_book"
-        )])
-    
+    today = date.today()
+    for i in range(14):
+        d = today + timedelta(days=i)
+        d_str = d.isoformat()
+        d_fmt = d.strftime('%d.%m.%Y (%a)')
+        kb.append([InlineKeyboardButton(text=f"🗓 {d_fmt}", callback_data=f"select_date:{d_str}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def slots_by_date_kb(slots):
-    """Показывает кнопки времени для текущего дня"""
+def durations_kb():
+    """Показывает выбор длительности смены"""
+    durations = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16]
     kb = []
-    for sid, ts, te in slots:
-        kb.append([InlineKeyboardButton(
-            text=f"⏰ {ts} – {te}",
-            callback_data=f"multi_book:{sid}"
-        )])
+    for dur in durations:
+        kb.append([InlineKeyboardButton(text=f"⏳ {dur} часов", callback_data=f"select_dur:{dur}")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад к датам", callback_data="back_to_dates")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def start_times_kb(duration):
+    """Генерирует доступное время начала смены с 07:00 до 01:00"""
+    kb = []
+    # Начало работы 07:00, конец 01:00 (следующего дня).
+    # 01:00 = 25:00 для удобства расчета
+    start_hour = 7
+    end_hour = 25 
+    
+    for h in range(start_hour, end_hour):
+        if h + duration <= end_hour: # Проверяем, укладывается ли смена в рабочий день
+            time_start = f"{h:02d}:00"
+            
+            end_h = h + duration
+            if end_h >= 24:
+                time_end = f"{end_h - 24:02d}:00"
+            else:
+                time_end = f"{end_h:02d}:00"
+                
+            kb.append([InlineKeyboardButton(
+                text=f"⏰ {time_start} - {time_end}",
+                callback_data=f"select_time:{time_start}:{time_end}"
+            )])
+            
+    kb.append([InlineKeyboardButton(text="🔙 Назад к выбору часов", callback_data="back_to_durs")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def my_slots_kb(slots):
@@ -166,7 +179,6 @@ async def reg_phone_contact(msg: Message, state: FSMContext):
     if msg.contact.user_id != msg.from_user.id:
         await msg.answer("⚠️ Пожалуйста, отправь именно свой номер телефона.")
         return
-        
     db.add_courier(msg.from_user.id, data["name"], msg.contact.phone_number)
     await state.clear()
     await msg.answer(
@@ -182,8 +194,8 @@ async def reg_phone_wrong(msg: Message):
 async def info(msg: Message):
     await msg.answer(
         f"🏪 <b>{DARKSTORE}</b>\n\n"
-        f"• Слоты на 14 дней вперёд\n"
-        f"• Можно взять несколько смен на разные дни\n"
+        f"• Выбор смен от 5 до 16 часов\n"
+        f"• Рабочий день с 07:00 до 01:00\n"
         f"• На одно время могут записаться несколько курьеров"
     )
 
@@ -192,107 +204,75 @@ async def info(msg: Message):
 @router.message(F.text == "📅 Свободные слоты")
 async def free_slots(msg: Message, state: FSMContext):
     await state.clear()
-    db.ensure_week_slots()
-    grouped = db.get_free_slots_by_date()
-    
-    if not grouped:
-        await msg.answer("Свободных слотов пока нет 😕")
-        return
-        
-    await state.update_data(selected_dates=[])
-    await msg.answer(
-        "Выбери дни, на которые хочешь записаться (можно несколько):", 
-        reply_markup=multi_dates_kb(grouped, [])
-    )
-    await state.set_state(MultiBook.choosing_times)
+    await msg.answer("Выбери дату, на которую хочешь записаться:", reply_markup=dates_kb())
+    await state.set_state(BookingProcess.choosing_duration)
 
-@router.callback_query(MultiBook.choosing_times, F.data.startswith("toggle_date:"))
-async def toggle_date(cb: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "back_to_dates")
+async def back_to_dates(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text("Выбери дату:", reply_markup=dates_kb())
+    await state.set_state(BookingProcess.choosing_duration)
+
+@router.callback_query(F.data.startswith("select_date:"))
+async def pick_date(cb: CallbackQuery, state: FSMContext):
     selected_date = cb.data.split(":")[1]
-    data = await state.get_data()
-    selected_dates = data.get("selected_dates", [])
     
-    if selected_date in selected_dates:
-        selected_dates.remove(selected_date)
-    else:
-        selected_dates.append(selected_date)
-        
-    await state.update_data(selected_dates=selected_dates)
-    
-    grouped = db.get_free_slots_by_date()
-    await cb.message.edit_reply_markup(
-        reply_markup=multi_dates_kb(grouped, selected_dates)
-    )
-
-@router.callback_query(F.data == "start_multi_book")
-async def start_multi_book(cb: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected_dates = sorted(data.get("selected_dates", []))
-    
-    if not selected_dates:
-        await cb.answer("Ты не выбрал ни одного дня!", show_alert=True)
+    existing = db.get_courier_shifts_by_date(cb.from_user.id, selected_date)
+    if existing > 0:
+        await cb.answer("⚠️ У тебя уже есть запись на этот день! Отмени её, если хочешь взять другую.", show_alert=True)
         return
         
-    # Берем первый день из списка
-    first_date = selected_dates[0]
-    remaining_dates = selected_dates[1:]
-    
-    await state.update_data(
-        current_date=first_date, 
-        remaining_dates=remaining_dates
-    )
-    
-    grouped = db.get_free_slots_by_date()
-    date_slots = [(item[0], item[2], item[3]) for item in grouped.get(first_date, [])]
+    await state.update_data(selected_date=selected_date)
     
     try:
-        d_formatted = date.fromisoformat(first_date).strftime('%d.%m.%Y')
+        d_fmt = date.fromisoformat(selected_date).strftime('%d.%m.%Y')
     except:
-        d_formatted = first_date
-
+        d_fmt = selected_date
+        
     await cb.message.edit_text(
-        f"🗓 <b>Дата: {d_formatted}</b>\nВыбери удобное время:",
-        reply_markup=slots_by_date_kb(date_slots)
+        f"🗓 <b>Дата: {d_fmt}</b>\nСколько часов хочешь отработать?", 
+        reply_markup=durations_kb()
+    )
+    await state.set_state(BookingProcess.choosing_time)
+
+@router.callback_query(F.data == "back_to_durs")
+async def back_to_durs(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected_date = data.get("selected_date", "")
+    try:
+        d_fmt = date.fromisoformat(selected_date).strftime('%d.%m.%Y')
+    except:
+        d_fmt = selected_date
+    await cb.message.edit_text(
+        f"🗓 <b>Дата: {d_fmt}</b>\nСколько часов хочешь отработать?", 
+        reply_markup=durations_kb()
     )
 
-@router.callback_query(F.data.startswith("multi_book:"))
-async def multi_book_time(cb: CallbackQuery, state: FSMContext):
-    slot_id = int(cb.data.split(":")[1])
+@router.callback_query(F.data.startswith("select_dur:"))
+async def pick_duration(cb: CallbackQuery, state: FSMContext):
+    duration = int(cb.data.split(":")[1])
+    await state.update_data(duration=duration)
+    
+    await cb.message.edit_text(
+        f"⏳ Длительность: <b>{duration} часов</b>\nВыбери время начала смены:", 
+        reply_markup=start_times_kb(duration)
+    )
+
+@router.callback_query(F.data.startswith("select_time:"))
+async def pick_time(cb: CallbackQuery, state: FSMContext):
+    _, time_start, time_end = cb.data.split(":")
     data = await state.get_data()
+    selected_date = data.get("selected_date")
     
-    current_date = data.get("current_date")
-    remaining_dates = data.get("remaining_dates", [])
+    db.book_slot(cb.from_user.id, selected_date, time_start, time_end)
+    await state.clear()
     
-    # Записываем на выбранное время
-    db.book_slot(slot_id, cb.from_user.id)
-    
-    if remaining_dates:
-        # Если есть еще дни, переходим к следующему
-        next_date = remaining_dates[0]
-        new_remaining = remaining_dates[1:]
-        
-        await state.update_data(
-            current_date=next_date, 
-            remaining_dates=new_remaining
-        )
-        
-        grouped = db.get_free_slots_by_date()
-        date_slots = [(item[0], item[2], item[3]) for item in grouped.get(next_date, [])]
-        
-        try:
-            d_formatted = date.fromisoformat(next_date).strftime('%d.%m.%Y')
-        except:
-            d_formatted = next_date
-            
-        await cb.message.edit_text(
-            f"🗓 <b>Дата: {d_formatted}</b>\nВыбери удобное время:",
-            reply_markup=slots_by_date_kb(date_slots)
-        )
-    else:
-        # Если дни закончились
-        await state.clear()
-        await cb.message.edit_text(f"✅ Успешно! Ты записан на выбранные дни.")
-        await cb.message.answer("Главное меню:", reply_markup=main_kb(cb.from_user.id in ADMIN_IDS))
+    await cb.message.edit_text(
+        f"✅ Ты успешно записан!\n"
+        f"📅 Дата: <b>{selected_date}</b>\n"
+        f"⏰ Время: <b>{time_start} - {time_end}</b>"
+    )
+    await cb.message.answer("Главное меню:", reply_markup=main_kb(cb.from_user.id in ADMIN_IDS))
 
 # --- МОИ СМЕНЫ И ОТМЕНА ---
 
@@ -358,7 +338,7 @@ async def cancel_detail(msg: Message, state: FSMContext):
 async def start_report(msg: Message, state: FSMContext):
     today = date.today().isoformat()
     if db.has_report_today(msg.from_user.id, today):
-        await msg.answer("⚠️ Ты уже сдал отчет за сегодня! Завтра сможешь сдать новый.")
+        await msg.answer("⚠️ Ты уже сдал отчет за сегодня!")
         return
     await msg.answer("Введи количество выполненных заданий (число от 1 до 150):")
     await state.set_state(ReportTasks.waiting_for_tasks)
@@ -366,14 +346,11 @@ async def start_report(msg: Message, state: FSMContext):
 @router.message(ReportTasks.waiting_for_tasks)
 async def process_report(msg: Message, state: FSMContext):
     if not msg.text.isdigit():
-        await msg.answer("⚠️ Введи только число (например: 25).")
+        await msg.answer("⚠️ Введи только число.")
         return
     tasks = int(msg.text)
-    if tasks < 1:
-        await msg.answer("⚠️ Количество заданий должно быть больше нуля.")
-        return
-    if tasks > 150:
-        await msg.answer("⚠️ Максимум 150 заданий за смену.")
+    if tasks < 1 or tasks > 150:
+        await msg.answer("⚠️ Введи реальное число (от 1 до 150).")
         return
     today = date.today().isoformat()
     db.save_report(msg.from_user.id, today, tasks)
@@ -480,7 +457,7 @@ async def sched_week(msg: Message):
         if not rows: continue
         lines.append(f"<b>{d.strftime('%d.%m (%a)')}</b>")
         for ts, te, name, phone in rows:
-            lines.append(f"  • {ts}-{te} — {name if name else 'пусто'}")
+            lines.append(f"  • {ts}-{te} — {name}")
         lines.append("")
     text = "\n".join(lines)
     for i in range(0, len(text), 4000):
@@ -544,23 +521,17 @@ async def cancels(msg: Message):
     await msg.answer("\n".join(lines))
 
 async def send_schedule(msg: Message, d: date):
-    db.ensure_week_slots()
     rows = db.schedule_for_date(d.isoformat())
     if not rows:
-        await msg.answer("Нет данных.")
+        await msg.answer(f"На {d.strftime('%d.%m.%Y')} пока никто не записан.")
         return
     lines = [f"📊 <b>График на {d.strftime('%d.%m.%Y')}</b>"]
     for ts, te, name, phone in rows:
-        if name:
-            lines.append(f"✅ {ts}-{te} — {name} ({phone})")
-        else:
-            lines.append(f"🟢 {ts}-{te} — свободен")
+        lines.append(f"✅ {ts}-{te} — {name} ({phone})")
     await msg.answer("\n".join(lines))
 
 async def main():
     db.init_db()
-    db.ensure_week_slots(days=14)
-    
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher()
     dp.include_router(router)
