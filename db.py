@@ -12,6 +12,8 @@ def init_db():
         full_name TEXT,
         phone TEXT
     )""")
+    
+    # Теперь слот содержит конкретное время начала и конца смены
     c.execute("""CREATE TABLE IF NOT EXISTS slots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         date TEXT NOT NULL,
@@ -19,6 +21,7 @@ def init_db():
         time_end TEXT NOT NULL,
         created_at TEXT
     )""")
+    
     c.execute("""CREATE TABLE IF NOT EXISTS bookings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         slot_id INTEGER,
@@ -63,38 +66,8 @@ def get_all_couriers():
     conn.close()
     return [r[0] for r in rows]
 
-def ensure_week_slots(days=14):
-    conn = sqlite3.connect(DB_PATH)
-    today = date.today()
-    
-    # ОБНОВЛЕННЫЙ СПИСОК СМЕН (10 вариантов)
-    times = [
-        ("07:00", "19:00"), # 12 часов
-        ("09:00", "21:00"), # 12 часов
-        ("10:00", "22:00"), # 12 часов
-        ("11:00", "23:00"), # 12 часов
-        ("11:00", "00:00"), # 13 часов
-        ("08:00", "20:00"), # 12 часов
-        ("13:00", "01:00"), # 12 часов
-        ("17:00", "01:00"), # 8 часов
-        ("17:00", "00:00"), # 7 часов
-        ("18:00", "00:00")  # 6 часов
-    ]
-    
-    for i in range(days):
-        d = (today + timedelta(days=i)).isoformat()
-        for ts, te in times:
-            exists = conn.execute(
-                "SELECT 1 FROM slots WHERE date=? AND time_start=?", (d, ts)
-            ).fetchone()
-            if not exists:
-                conn.execute(
-                    "INSERT INTO slots(date,time_start,time_end,created_at) VALUES (?,?,?,?)",
-                    (d, ts, te, datetime.now().isoformat())
-                )
-    conn.commit(); conn.close()
-
 def get_courier_shifts_by_date(courier_id, target_date):
+    """Проверяем, есть ли уже смена в этот день"""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("""
         SELECT b.id FROM bookings b
@@ -104,24 +77,33 @@ def get_courier_shifts_by_date(courier_id, target_date):
     conn.close()
     return len(rows)
 
-def get_free_slots_by_date():
+def book_slot(courier_id, date_str, time_start, time_end):
+    """Создает слот и сразу записывает на него курьера"""
     conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT id,date,time_start,time_end FROM slots WHERE date >= date('now') ORDER BY date,time_start"
-    ).fetchall()
-    conn.close()
-    grouped = {}
-    for r in rows:
-        grouped.setdefault(r[1], []).append(r)
-    return grouped
-
-def book_slot(slot_id, courier_id):
-    conn = sqlite3.connect(DB_PATH)
+    
+    # 1. Ищем, есть ли уже такой слот в базе
+    slot = conn.execute(
+        "SELECT id FROM slots WHERE date=? AND time_start=? AND time_end=?", 
+        (date_str, time_start, time_end)
+    ).fetchone()
+    
+    # 2. Если нет - создаем
+    if not slot:
+        cur = conn.execute(
+            "INSERT INTO slots(date, time_start, time_end, created_at) VALUES (?,?,?,?)",
+            (date_str, time_start, time_end, datetime.now().isoformat())
+        )
+        slot_id = cur.lastrowid
+    else:
+        slot_id = slot[0]
+        
+    # 3. Записываем курьера на этот слот
     try:
         conn.execute("INSERT INTO bookings(slot_id, courier_id) VALUES (?,?)", (slot_id, courier_id))
         ok = True
     except sqlite3.IntegrityError:
-        ok = False
+        ok = False # Уже записан
+        
     conn.commit(); conn.close()
     return ok
 
@@ -156,7 +138,7 @@ def schedule_for_date(d):
     rows = conn.execute("""
         SELECT s.time_start, s.time_end, c.full_name, c.phone
         FROM slots s 
-        LEFT JOIN bookings b ON s.id = b.slot_id AND b.status='booked'
+        JOIN bookings b ON s.id = b.slot_id AND b.status='booked'
         LEFT JOIN couriers c ON b.courier_id = c.user_id
         WHERE s.date=? ORDER BY s.time_start
     """, (d,)).fetchall()
